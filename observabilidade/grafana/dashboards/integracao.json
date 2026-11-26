@@ -1,0 +1,457 @@
+{
+  "uid": "integracao-t2",
+  "title": "T2 - Integração iEducar -> Moodle (microsserviços)",
+  "tags": [
+    "t2",
+    "microsservicos"
+  ],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "5s",
+  "time": {
+    "from": "now-15m",
+    "to": "now"
+  },
+  "editable": true,
+  "panels": [
+    {
+      "id": 1,
+      "title": "Mensagens publicadas por segundo (eventos e comandos)",
+      "description": "Contador custom integracao_mensagens_publicadas_total{tipo}",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (tipo) (rate(monitor_eventos_publicados_total[1m]))",
+          "refId": "A",
+          "editorMode": "code",
+          "legendFormat": "monitor -> {{tipo}}"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (tipo) (rate(integracao_comandos_publicados_total[1m]))",
+          "refId": "B",
+          "editorMode": "code",
+          "legendFormat": "sincronizador -> {{tipo}}"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum(rate(integracao_comandos_processados_total{resultado=~\"sucesso|parcial\"}[1m]))",
+          "refId": "C",
+          "editorMode": "code",
+          "legendFormat": "publicador -> TurmaSincronizada.v1"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "options": {}
+    },
+    {
+      "id": 2,
+      "title": "Mensagens consumidas por segundo (por serviço, tipo e resultado)",
+      "description": "Contador custom integracao_mensagens_consumidas_total{tipo,resultado}",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 0,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (job, tipo, resultado) (rate(integracao_mensagens_consumidas_total[1m]))",
+          "refId": "A",
+          "editorMode": "code",
+          "legendFormat": "{{job}} {{tipo}} {{resultado}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "options": {}
+    },
+    {
+      "id": 3,
+      "title": "Circuit breaker ABERTO? (1 = aberto)",
+      "description": "resilience4j_circuitbreaker_state{state=open}",
+      "type": "stat",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 8,
+        "w": 8,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "max by (job, name) (resilience4j_circuitbreaker_state{state=\"open\"})",
+          "refId": "A",
+          "editorMode": "code",
+          "legendFormat": "{{job}} / {{name}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "1": {
+                  "text": "ABERTO",
+                  "color": "red"
+                },
+                "0": {
+                  "text": "fechado",
+                  "color": "green"
+                }
+              }
+            }
+          ]
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "colorMode": "background",
+        "graphMode": "none"
+      }
+    },
+    {
+      "id": 4,
+      "title": "Chamadas externas (iEducar/Moodle) por resultado",
+      "description": "successful / failed / ignored",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 8,
+        "y": 8,
+        "w": 8,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (job, name, kind) (rate(resilience4j_circuitbreaker_calls_seconds_count[1m]))",
+          "refId": "A",
+          "editorMode": "code",
+          "legendFormat": "{{job}} {{name}} {{kind}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "options": {}
+    },
+    {
+      "id": 5,
+      "title": "Chamadas barradas pelo circuito aberto",
+      "description": "Chamadas que nem chegaram ao sistema externo porque o circuito estava aberto",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 16,
+        "y": 8,
+        "w": 8,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (job, name) (increase(resilience4j_circuitbreaker_not_permitted_calls_total[1m]))",
+          "refId": "A",
+          "editorMode": "code",
+          "legendFormat": "{{job}} {{name}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {}
+    },
+    {
+      "id": 6,
+      "title": "Retries (últimos 5 min)",
+      "description": "successful_without_retry / successful_with_retry / failed_with_retry / failed_without_retry",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 16,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (job, name, kind) (increase(resilience4j_retry_calls_total[5m]))",
+          "refId": "A",
+          "editorMode": "code",
+          "legendFormat": "{{job}} {{name}} {{kind}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {}
+    },
+    {
+      "id": 7,
+      "title": "Latência média das chamadas HTTP externas",
+      "description": "Tempo médio por chamada ao iEducar/Moodle (via resilience4j e, se disponível, http_client_requests)",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 16,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (job, name) (rate(resilience4j_circuitbreaker_calls_seconds_sum[1m])) / sum by (job, name) (rate(resilience4j_circuitbreaker_calls_seconds_count[1m]))",
+          "refId": "A",
+          "editorMode": "code",
+          "legendFormat": "{{job}} {{name}}{{uri}}"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (job, uri) (rate(http_client_requests_seconds_sum[1m])) / sum by (job, uri) (rate(http_client_requests_seconds_count[1m]))",
+          "refId": "B",
+          "editorMode": "code",
+          "legendFormat": "{{job}} {{name}}{{uri}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "options": {}
+    },
+    {
+      "id": 8,
+      "title": "Mensagens prontas por fila (RabbitMQ)",
+      "description": "Inclui retry-5s, retry-30s e as DLQs (fila *.dlq > 0 = mensagem parada)",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 24,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (queue) (rabbitmq_queue_messages_ready)",
+          "refId": "A",
+          "editorMode": "code",
+          "legendFormat": "{{queue}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {}
+    },
+    {
+      "id": 9,
+      "title": "Requisições HTTP recebidas pelas APIs dos serviços",
+      "description": "",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 24,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (job, uri, status) (rate(http_server_requests_seconds_count{uri=~\"/api/.*\"}[1m]))",
+          "refId": "A",
+          "editorMode": "code",
+          "legendFormat": "{{job}} {{uri}} {{status}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "options": {}
+    },
+    {
+      "id": 10,
+      "title": "Comandos processados pelo publicador-moodle (sucesso / retry / dlq / duplicado)",
+      "description": "Contador custom integracao_mensagens_consumidas_total{tipo,resultado}",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 32
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (resultado) (increase(integracao_comandos_processados_total[5m]))",
+          "refId": "A",
+          "editorMode": "code",
+          "legendFormat": "{{resultado}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "options": {}
+    },
+    {
+      "id": 11,
+      "title": "Varreduras do monitor por status (últimos 5 min)",
+      "description": "Contador custom integracao_mensagens_consumidas_total{tipo,resultado}",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 32
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (status) (increase(monitor_varreduras_total[5m]))",
+          "refId": "A",
+          "editorMode": "code",
+          "legendFormat": "{{status}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "options": {}
+    }
+  ]
+}

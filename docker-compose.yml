@@ -1,0 +1,362 @@
+# Ambiente completo do T2: integração iEducar -> Moodle em MICROSSERVIÇOS que conversam por mensagens (RabbitMQ).
+#
+#   iEducar ............ http://localhost:${IEDUCAR_PORT:-8080}      (admin / 123456789)
+#   Moodle ............. http://localhost:${MOODLE_PORT:-8081}       (admin / Admin@12345)
+#   RabbitMQ (painel) .. http://localhost:15672                      (guest / guest)
+#   monitor-ieducar .... http://localhost:${MONITOR_PORT:-8091}      (detecta mudanças no iEducar)
+#   sincronizador ...... http://localhost:${SINCRONIZADOR_PORT:-8092} (mapeamento e estado da integração)
+#   publicador-moodle .. http://localhost:${PUBLICADOR_PORT:-8093}    (aplica no Moodle)
+#   Jaeger (traces) .... http://localhost:16686
+#   Prometheus ......... http://localhost:9090
+#   Grafana ............ http://localhost:3000                       (admin / admin; dashboard já provisionado)
+#
+# Entre containers use sempre o NOME do serviço (rabbitmq, ieducar, moodle:8080, sincronizador-db...).
+# Cada microsserviço tem o PRÓPRIO banco; nenhum acessa o banco de outro (só conversam via RabbitMQ).
+name: t2-microsservicos
+
+services:
+  # =====================================================================================
+  # Mensageria
+  # =====================================================================================
+  rabbitmq:
+    image: rabbitmq:4-management
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    volumes:
+      - rabbitmq-data:/var/lib/rabbitmq
+      # habilita as métricas Prometheus do broker (profundidade das filas, DLQ etc.)
+      - ./observabilidade/rabbitmq/enabled_plugins:/etc/rabbitmq/enabled_plugins:ro
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 10s
+      retries: 20
+      start_period: 20s
+    restart: unless-stopped
+
+  # =====================================================================================
+  # Bancos dos microsserviços (um por serviço)
+  # =====================================================================================
+  monitor-db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: monitor
+      POSTGRES_USER: monitor
+      POSTGRES_PASSWORD: monitor
+    volumes:
+      - monitor-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U monitor -d monitor"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
+  sincronizador-db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: sincronizador
+      POSTGRES_USER: sincronizador
+      POSTGRES_PASSWORD: sincronizador
+    volumes:
+      - sincronizador-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sincronizador -d sincronizador"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
+  publicador-db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: publicador
+      POSTGRES_USER: publicador
+      POSTGRES_PASSWORD: publicador
+    volumes:
+      - publicador-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U publicador -d publicador"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
+  # =====================================================================================
+  # Microsserviços
+  # =====================================================================================
+  monitor-ieducar:
+    build: ./services/monitor-ieducar
+    image: t2/monitor-ieducar
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      monitor-db:
+        condition: service_healthy
+      # sobe depois do sincronizador só para a fila já existir na 1ª varredura (sem isso a mensagem seria
+      # "não roteável" e republicada na varredura seguinte; funcionaria, mas o log do início fica mais limpo)
+      sincronizador:
+        condition: service_healthy
+      ieducar:
+        condition: service_healthy
+    ports:
+      - "${MONITOR_PORT:-8091}:8080"
+    environment:
+      SPRING_PROFILES_ACTIVE: ${LOG_FORMATO:-texto}
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_PORT: "5672"
+      RABBITMQ_USER: ${RABBITMQ_USER:-guest}
+      RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD:-guest}
+      DB_URL: jdbc:postgresql://monitor-db:5432/monitor
+      DB_USER: monitor
+      DB_PASSWORD: monitor
+      OTLP_TRACING_ENDPOINT: http://jaeger:4318/v1/traces
+      IEDUCAR_URL: http://ieducar
+      IEDUCAR_API_TOKEN: ${IEDUCAR_API_TOKEN:-ieducar-integracao-token-trocar-em-producao-0000}
+      IEDUCAR_API_ACCESS_KEY: ${IEDUCAR_API_ACCESS_KEY:-ieducar-access-key}
+      IEDUCAR_API_SECRET_KEY: ${IEDUCAR_API_SECRET_KEY:-ieducar-secret-key}
+      IEDUCAR_INSTITUICAO_ID: ${IEDUCAR_INSTITUICAO_ID:-1}
+      MONITOR_INTERVALO: ${MONITOR_INTERVALO:-PT1M}
+      MONITOR_ATRASO_INICIAL: ${MONITOR_ATRASO_INICIAL:-PT20S}
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8080/actuator/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 40s
+    restart: unless-stopped
+
+  sincronizador:
+    build: ./services/sincronizador
+    image: t2/sincronizador
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      sincronizador-db:
+        condition: service_healthy
+    ports:
+      - "${SINCRONIZADOR_PORT:-8092}:8080"
+    environment:
+      SPRING_PROFILES_ACTIVE: ${LOG_FORMATO:-texto}
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_PORT: "5672"
+      RABBITMQ_USER: ${RABBITMQ_USER:-guest}
+      RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD:-guest}
+      DB_URL: jdbc:postgresql://sincronizador-db:5432/sincronizador
+      DB_USER: sincronizador
+      DB_PASSWORD: sincronizador
+      OTLP_TRACING_ENDPOINT: http://jaeger:4318/v1/traces
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8080/actuator/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 40s
+    restart: unless-stopped
+
+  publicador-moodle:
+    build: ./services/publicador-moodle
+    image: t2/publicador-moodle
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      publicador-db:
+        condition: service_healthy
+      moodle:
+        condition: service_healthy
+    ports:
+      - "${PUBLICADOR_PORT:-8093}:8080"
+    environment:
+      SPRING_PROFILES_ACTIVE: ${LOG_FORMATO:-texto}
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_PORT: "5672"
+      RABBITMQ_USER: ${RABBITMQ_USER:-guest}
+      RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD:-guest}
+      DB_URL: jdbc:postgresql://publicador-db:5432/publicador
+      DB_USER: publicador
+      DB_PASSWORD: publicador
+      OTLP_TRACING_ENDPOINT: http://jaeger:4318/v1/traces
+      MOODLE_URL: http://moodle:8080
+      MOODLE_WS_TOKEN: ${MOODLE_WS_TOKEN:-a1b2c3d4e5f60718293a4b5c6d7e8f90}
+      MOODLE_PAPEL_ALUNO_ID: ${MOODLE_PAPEL_ALUNO_ID:-5}
+      MOODLE_PAPEL_PROFESSOR_ID: ${MOODLE_PAPEL_PROFESSOR_ID:-3}
+      MOODLE_SENHA_INICIAL: ${MOODLE_SENHA_INICIAL:-Mudar@2026!}
+      MOODLE_DOMINIO_EMAIL: ${MOODLE_DOMINIO_EMAIL:-exemplo.edu.br}
+      # habilita o endpoint /api/falhas/moodle que simula o Moodle fora do ar (usado nos cenários de falha)
+      FALHA_INJETAVEL: ${FALHA_INJETAVEL:-true}
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8080/actuator/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 40s
+    restart: unless-stopped
+
+  # =====================================================================================
+  # Observabilidade (traces, métricas e painéis)
+  # =====================================================================================
+  jaeger:
+    image: jaegertracing/all-in-one:1.62.0
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+    ports:
+      - "16686:16686"   # interface web
+      - "4318:4318"     # OTLP/HTTP (os serviços enviam os traces para cá)
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:v3.5.0
+    volumes:
+      - ./observabilidade/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "9090:9090"
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:12.1.0
+    depends_on:
+      - prometheus
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      # painel aberto para quem acessar (é um ambiente de demonstração local)
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/integracao.json
+    volumes:
+      - ./observabilidade/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./observabilidade/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports:
+      - "3000:3000"
+    restart: unless-stopped
+
+  # =====================================================================================
+  # iEducar (origem) - igual ao T1
+  # =====================================================================================
+  ieducar-db:
+    image: postgres:18-alpine
+    environment:
+      POSTGRES_DB: ieducar
+      POSTGRES_USER: ieducar
+      POSTGRES_PASSWORD: ieducar
+    volumes:
+      - ieducar-db-data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ieducar -d ieducar"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
+  ieducar-redis:
+    image: redis:8-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  ieducar:
+    build:
+      context: ./docker/ieducar
+      args:
+        IEDUCAR_REF: "2.12"
+        # Se o build falhar com "Could not authenticate against github.com" (limite da API do GitHub),
+        # defina COMPOSER_INSTALL_FLAGS=--prefer-source no .env (a imagem fica maior).
+        COMPOSER_INSTALL_FLAGS: ${COMPOSER_INSTALL_FLAGS:-}
+    image: integracao/ieducar:2.12
+    depends_on:
+      ieducar-db:
+        condition: service_healthy
+      ieducar-redis:
+        condition: service_healthy
+    ports:
+      - "${IEDUCAR_PORT:-8080}:80"
+    environment:
+      APP_ENV: production
+      APP_DEBUG: "false"
+      APP_URL: http://localhost:${IEDUCAR_PORT:-8080}
+      APP_TIMEZONE: America/Sao_Paulo
+      DB_HOST: ieducar-db
+      DB_DATABASE: ieducar
+      DB_USERNAME: ieducar
+      DB_PASSWORD: ieducar
+      REDIS_HOST: ieducar-redis
+      API_ACCESS_KEY: ${IEDUCAR_API_ACCESS_KEY:-ieducar-access-key}
+      API_SECRET_KEY: ${IEDUCAR_API_SECRET_KEY:-ieducar-secret-key}
+      IEDUCAR_API_TOKEN: ${IEDUCAR_API_TOKEN:-ieducar-integracao-token-trocar-em-producao-0000}
+    volumes:
+      - ieducar-storage:/var/www/ieducar/storage
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1/api/version >/dev/null || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 40
+      start_period: 600s
+    restart: unless-stopped
+
+  # =====================================================================================
+  # Moodle (destino) - igual ao T1
+  # =====================================================================================
+  moodle-db:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: moodle
+      POSTGRES_USER: moodle
+      POSTGRES_PASSWORD: moodle
+    volumes:
+      - moodle_db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U moodle -d moodle"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  moodle:
+    image: bitnamilegacy/moodle:5.0.2
+    restart: unless-stopped
+    depends_on:
+      moodle-db:
+        condition: service_healthy
+    ports:
+      - "${MOODLE_PORT:-8081}:8080"
+    environment:
+      MOODLE_DATABASE_TYPE: pgsql
+      MOODLE_DATABASE_HOST: moodle-db
+      MOODLE_DATABASE_PORT_NUMBER: "5432"
+      MOODLE_DATABASE_NAME: moodle
+      MOODLE_DATABASE_USER: moodle
+      MOODLE_DATABASE_PASSWORD: moodle
+      MOODLE_USERNAME: ${MOODLE_ADMIN_USER:-admin}
+      MOODLE_PASSWORD: ${MOODLE_ADMIN_PASSWORD:-Admin@12345}
+      MOODLE_EMAIL: admin@exemplo.edu.br
+      MOODLE_SITE_NAME: "Moodle - Integração iEducar"
+      MOODLE_LANG: pt_br
+      # MOODLE_HOST não é definido de propósito: o wwwroot fica dinâmico ($_SERVER['HTTP_HOST']),
+      # então localhost:8081 (navegador) e moodle:8080 (publicador-moodle) funcionam.
+      MOODLE_WS_TOKEN: ${MOODLE_WS_TOKEN:-a1b2c3d4e5f60718293a4b5c6d7e8f90}
+    volumes:
+      - moodle_data:/bitnami/moodle
+      - moodle_moodledata:/bitnami/moodledata
+      - ./docker/moodle/init:/docker-entrypoint-init.d:ro
+    healthcheck:
+      # a imagem não tem curl/wget: testa o HTTP com o /dev/tcp do bash
+      test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/127.0.0.1/8080 && printf \"GET /login/index.php HTTP/1.0\\r\\nHost: localhost\\r\\n\\r\\n\" >&3 && head -n1 <&3 | grep -q \" 200 \"'"]
+      interval: 15s
+      timeout: 10s
+      retries: 40
+      start_period: 120s
+
+volumes:
+  rabbitmq-data:
+  monitor-db-data:
+  sincronizador-db-data:
+  publicador-db-data:
+  ieducar-db-data:
+  ieducar-storage:
+  moodle_db_data:
+  moodle_data:
+  moodle_moodledata:
